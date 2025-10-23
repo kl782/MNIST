@@ -1,0 +1,41 @@
+# Paperspace-specific ignores
+
+# Local test outputs
+paperspace_outputs/
+paperspace_inputs/
+temp/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.venv
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Secrets (never commit!)
+google_drive_credentials.json
+*.pem
+*.key
+secrets.yaml
+
+# Test files
+test_*.json
+debug_*.log
+

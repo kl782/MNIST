@@ -1,0 +1,26 @@
+# Exclude everything except paperspace deployment files
+/*
+!.gradient/
+!paperspace/
+!README.md
+!.gitignore
+!DEPLOYMENT_SUMMARY.md
+
+# But exclude sensitive/output files
+paperspace_outputs/
+logs/
+*.log
+config.py
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Secrets
+google_drive_credentials.json
+*.pem
+*.key
+

@@ -1,0 +1,72 @@
+# Paperspace Deployment Spec for Webhook Server
+# This deploys the webhook server as a persistent service
+
+apiVersion: v0alpha1
+kind: Deployment
+name: ai-pipeline-webhook
+enabled: true
+
+spec:
+  # Image configuration
+  image: python:3.11-slim
+  
+  # Port configuration
+  port: 8080
+  
+  # Resource allocation
+  resources:
+    replicas: 1
+    instanceType: C5  # CPU instance (no GPU needed for webhook)
+  
+  # Environment variables
+  env:
+    - name: PORT
+      value: "8080"
+    - name: OPENAI_API_KEY
+      value: ${OPENAI_API_KEY}  # Set in Paperspace secrets
+    - name: PAPERSPACE_API_KEY
+      value: ${PAPERSPACE_API_KEY}
+    - name: PAPERSPACE_PROJECT_ID
+      value: ${PAPERSPACE_PROJECT_ID}
+    - name: PAPERSPACE_WORKFLOW_ID
+      value: ${PAPERSPACE_WORKFLOW_ID}
+    - name: GDRIVE_CREDENTIALS_PATH
+      value: /app/secrets/google_drive_credentials.json
+    - name: GDRIVE_FINAL_REPORT_FOLDER
+      value: ${GDRIVE_FINAL_REPORT_FOLDER}
+  
+  # Startup command
+  command:
+    - /bin/bash
+    - -c
+    - |
+      set -e
+      echo "Installing dependencies..."
+      pip install --no-cache-dir \
+        flask \
+        flask-cors \
+        gunicorn \
+        waitress \
+        google-api-python-client \
+        google-auth \
+        google-auth-httplib2 \
+        google-auth-oauthlib \
+        gradient
+      
+      echo "Starting webhook server..."
+      cd /app
+      python3 paperspace/webhook_server_cloud.py
+  
+  # Health check
+  healthCheck:
+    path: /health
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+  
+  # Persistent volume for logs and temporary storage
+  volumes:
+    - name: webhook-storage
+      size: 10Gi
+      mountPath: /outputs
+

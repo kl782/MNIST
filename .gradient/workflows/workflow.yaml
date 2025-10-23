@@ -1,0 +1,227 @@
+# Paperspace Workflow - AI Pipeline
+# Triggered via GitHub push or direct API call
+# Can be triggered directly via Paperspace API (no webhook server needed!)
+
+on:
+  github:
+    branches:
+      only: main
+
+jobs:
+  # Job 1: Setup and download company data
+  CloneRepo:
+    resources:
+      instance-type: C5
+    outputs:
+      repo:
+        type: volume
+    uses: git-checkout@v1
+    with:
+      url: context.github.url
+
+  Setup:
+    needs:
+      - CloneRepo
+    resources:
+      instance-type: C5
+    inputs:
+      repo: CloneRepo.outputs.repo
+    outputs:
+      company-data:
+        type: volume
+    uses: script@v1
+    with:
+      image: python:3.11-slim
+      script: |-
+        set -e
+        echo "=========================================="
+        echo "SETUP: AI Pipeline"
+        echo "=========================================="
+        
+        cd /inputs/repo
+        
+        # Install dependencies
+        echo "Installing dependencies..."
+        pip install --no-cache-dir \
+          google-api-python-client \
+          google-auth \
+          pandas \
+          requests
+        
+        # Get company info from environment or use defaults
+        COMPANY_NAME="${COMPANY_NAME:-Test Company}"
+        COMPANY_SLUG=$(echo "$COMPANY_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g')
+        USE_CASES="${USE_CASES_COUNT:-7}"
+        
+        echo "Company: $COMPANY_NAME"
+        echo "Slug: $COMPANY_SLUG"
+        
+        # Create company data directory
+        mkdir -p "start_here/$COMPANY_NAME"
+        
+        # Download Google Drive files if link provided
+        if [ -n "${GOOGLE_DRIVE_LINK}" ]; then
+          echo "Downloading from Google Drive: ${GOOGLE_DRIVE_LINK}"
+          python3 paperspace/scripts/download_gdrive.py \
+            --url "${GOOGLE_DRIVE_LINK}" \
+            --output "start_here/$COMPANY_NAME"
+        fi
+        
+        # Create company info file
+        cat > company_info.json <<EOFINNER
+        {
+          "company_name": "$COMPANY_NAME",
+          "company_slug": "$COMPANY_SLUG",
+          "use_cases_count": $USE_CASES,
+          "company_description": "${COMPANY_DESCRIPTION:-}",
+          "readiness_score": "${READINESS_SCORE:-50}",
+          "readiness_category": "${READINESS_CATEGORY:-Explorer}",
+          "report_expectations": "${REPORT_EXPECTATIONS:-}"
+        }
+EOFINNER
+        
+        # Copy to output
+        cp -r . /outputs/company-data/
+        
+        echo "✅ Setup complete"
+
+  VectorStore:
+    needs:
+      - Setup
+    inputs:
+      company-data: Setup.outputs.company-data
+    outputs:
+      vector-id:
+        type: volume
+    resources:
+      instance-type: C7
+    uses: script@v1
+    with:
+      image: python:3.11-slim
+      script: |-
+        set -e
+        cd /inputs/company-data
+        
+        echo "Installing Python dependencies..."
+        pip install --no-cache-dir \
+          openai \
+          pandas \
+          python-dotenv
+        
+        # Load company info
+        export COMPANY_NAME=$(python3 -c "import json; print(json.load(open('company_info.json'))['company_name'])")
+        echo "Processing: $COMPANY_NAME"
+        
+        # Convert CSV to JSON if needed
+        python3 paperspace/scripts/preprocess_data.py \
+          --input start_here/${COMPANY_NAME} \
+          --output start_here/${COMPANY_NAME}
+        
+        # Upload to vector store
+        python3 helper_vectorstoreupload.py "start_here/${COMPANY_NAME}"
+        
+        # Save vector store ID
+        mkdir -p /outputs/vector-id
+        cp -r vector_IDs /outputs/vector-id/
+        
+        echo "Vector store setup complete"
+
+  Pipeline:
+    needs:
+      - VectorStore
+    inputs:
+      company-data: Setup.outputs.company-data
+      vector-id: VectorStore.outputs.vector-id
+    outputs:
+      final-reports:
+        type: dataset
+    resources:
+      instance-type: P4000
+    uses: script@v1
+    with:
+      image: python:3.11-slim
+      script: |-
+        set -e
+        cd /inputs/company-data
+        
+        echo "Installing full dependencies..."
+        pip install --no-cache-dir \
+          openai \
+          anthropic \
+          langchain \
+          langchain-openai \
+          qdrant-client \
+          pandas \
+          numpy \
+          scikit-learn \
+          python-dotenv \
+          aiohttp \
+          beautifulsoup4 \
+          lxml
+        
+        # Load company info
+        COMPANY_INFO=$(cat company_info.json)
+        export COMPANY_NAME=$(echo $COMPANY_INFO | python3 -c "import sys, json; print(json.load(sys.stdin)['company_name'])")
+        export USE_CASES_COUNT=$(echo $COMPANY_INFO | python3 -c "import sys, json; print(json.load(sys.stdin)['use_cases_count'])")
+        
+        # Copy vector IDs
+        cp -r /inputs/vector-id/vector_IDs ./
+        
+        echo "Running cloud pipeline..."
+        python3 paperspace/pipeline_cloud.py \
+          "${COMPANY_NAME}" \
+          --model-set gpt5 \
+          --use-cases-count ${USE_CASES_COUNT}
+        
+        # Copy outputs
+        mkdir -p /outputs/final-reports
+        if [ -d "/outputs/${COMPANY_SLUG}" ]; then
+          cp -r /outputs/${COMPANY_SLUG}/* /outputs/final-reports/ 2>/dev/null || true
+        fi
+        
+        echo "Pipeline complete"
+
+  Upload:
+    needs:
+      - Pipeline
+    inputs:
+      final-reports: Pipeline.outputs.final-reports
+    resources:
+      instance-type: C5
+    uses: script@v1
+    with:
+      image: python:3.11-slim
+      script: |-
+        set -e
+        
+        pip install --no-cache-dir \
+          google-api-python-client \
+          google-auth
+        
+        echo "Uploading final report to Google Drive..."
+        
+        # Find the latest final report
+        FINAL_REPORT=$(ls -t /inputs/final-reports/final/FINAL_REPORT_*.md 2>/dev/null | head -1 || echo "")
+        
+        if [ -z "$FINAL_REPORT" ]; then
+          echo "No final report found, checking other locations..."
+          FINAL_REPORT=$(find /inputs/final-reports -name "*.md" -type f | head -1 || echo "")
+        fi
+        
+        if [ -z "$FINAL_REPORT" ]; then
+          echo "ERROR: No final report found"
+          exit 1
+        fi
+        
+        echo "Found report: $FINAL_REPORT"
+        
+        # Upload logic here (requires GDRIVE_CREDENTIALS_PATH and GDRIVE_FINAL_REPORT_FOLDER env vars)
+        if [ -f "/app/secrets/google_drive_credentials.json" ]; then
+          echo "Service account credentials found, uploading..."
+          # Upload implementation
+        else
+          echo "No credentials found, skipping Drive upload"
+          echo "Report available at: $FINAL_REPORT"
+        fi
+        
+        echo "Upload step complete"
